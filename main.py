@@ -45,7 +45,7 @@ class MediaProcessor:
     # 支持的图片格式
     IMAGE_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.bmp', '.gif', '.tiff'}
     # 支持的视频格式
-    VIDEO_EXTENSIONS = {'.avi', '.mp4', '.mov', '.mkv', '.flv', '.wmv', '.3gp'}
+    VIDEO_EXTENSIONS = {'.avi', '.mp4', '.mov', '.mkv', '.flv', '.wmv', '.3gp', '.vob'}
     # 支持的音频格式
     AUDIO_EXTENSIONS = {'.amr', '.mp3', '.wav', '.aac', '.flac'}
     
@@ -88,6 +88,12 @@ class MediaProcessor:
         logger.info(f"找到 {len(threeGp_files)} 个3GP文件")
         for threeGp_file in threeGp_files:
             self.process_3gp(threeGp_file)
+        
+        # 处理VOB文件
+        vob_files = [f for f in files if f.suffix.lower() == '.vob']
+        logger.info(f"找到 {len(vob_files)} 个VOB文件")
+        for vob_file in vob_files:
+            self.process_vob(vob_file)
         
         # 处理AMR文件
         amr_files = [f for f in files if f.suffix.lower() == '.amr']
@@ -177,6 +183,36 @@ class MediaProcessor:
             
             # 从文件名猜测创建时间并写入MP4元数据
             media_date = self.guess_datetime_from_filename(threeGp_path)
+            if media_date:
+                self.set_mp4_metadata(mp4_path, media_date)
+                logger.info(f"  已设置MP4时间戳: {media_date}")
+    
+    def process_vob(self, vob_path: Path):
+        """
+        处理VOB文件（与AVI相同的操作）
+        
+        Args:
+            vob_path: VOB文件路径
+        """
+        logger.info(f"处理VOB: {vob_path.name}")
+        
+        # 创建归档目录
+        self.archive_dir.mkdir(parents=True, exist_ok=True)
+        
+        # 移动VOB文件到归档目录
+        archive_vob_path = self.archive_dir / vob_path.name
+        shutil.move(str(vob_path), str(archive_vob_path))
+        logger.info(f"  已移动到: {archive_vob_path}")
+        
+        # 生成MP4文件
+        mp4_name = vob_path.stem + '.mp4'
+        mp4_path = self.source_dir / mp4_name
+        
+        if self.convert_vob_to_mp4(archive_vob_path, mp4_path):
+            logger.info(f"  已生成MP4: {mp4_path.name}")
+            
+            # 从文件名猜测创建时间并写入MP4元数据
+            media_date = self.guess_datetime_from_filename(vob_path)
             if media_date:
                 self.set_mp4_metadata(mp4_path, media_date)
                 logger.info(f"  已设置MP4时间戳: {media_date}")
@@ -300,14 +336,14 @@ class MediaProcessor:
             datetime对象或None
         """
         # 模式0: 对于视频或音频文件，如果是最后一个文件，尝试从前一个文件时间+1分钟
-        if file_path.suffix.lower() in {'.avi', '.3gp', '.amr'}:
+        if file_path.suffix.lower() in {'.avi', '.3gp', '.vob', '.amr'}:
             last_file_date = self._get_datetime_from_last_file(file_path)
             if last_file_date:
                 logger.info(f"  （最后一个文件）从前一个文件推断时间: {last_file_date}")
                 return last_file_date
             
             # 模式1: 对于视频文件，尝试通过相邻照片的EXIF时间插值
-            if file_path.suffix.lower() in {'.avi', '.3gp'}:
+            if file_path.suffix.lower() in {'.avi', '.3gp', '.vob'}:
                 interpolated_date = self._interpolate_datetime_from_neighbors(file_path)
                 if interpolated_date:
                     logger.info(f"  通过相邻照片插值得到时间: {interpolated_date}")
@@ -598,6 +634,53 @@ class MediaProcessor:
             return mp4_path.exists()
         except subprocess.TimeoutExpired:
             logger.error(f"转换超时: {threeGp_path.name}")
+            return False
+        except Exception as e:
+            logger.error(f"转换失败: {e}")
+            return False
+    
+    def convert_vob_to_mp4(self, vob_path: Path, mp4_path: Path) -> bool:
+        """
+        使用ffmpeg将VOB转换为MP4
+        
+        Args:
+            vob_path: VOB文件路径
+            mp4_path: 输出MP4文件路径
+            
+        Returns:
+            转换是否成功
+        """
+        try:
+            # 检查ffmpeg是否已安装
+            subprocess.run(['ffmpeg', '-version'], 
+                         capture_output=True, 
+                         check=True)
+        except (FileNotFoundError, subprocess.CalledProcessError):
+            logger.error("ffmpeg未安装，无法转换视频")
+            return False
+        
+        try:
+            # 使用ffmpeg转换VOB为MP4，保持质量
+            cmd = [
+                'ffmpeg',
+                '-i', str(vob_path),
+                '-c:v', 'libx264',
+                '-preset', 'medium',
+                '-crf', '18',  # 质量参数，18很高，0是无损
+                '-c:a', 'aac',
+                '-q:a', '9',
+                '-y',  # 覆盖输出文件
+                str(mp4_path)
+            ]
+            
+            logger.info(f"  转换中: {vob_path.name} -> {mp4_path.name}")
+            subprocess.run(cmd, check=True, 
+                         capture_output=True,
+                         timeout=3600)  # 1小时超时
+            
+            return mp4_path.exists()
+        except subprocess.TimeoutExpired:
+            logger.error(f"转换超时: {vob_path.name}")
             return False
         except Exception as e:
             logger.error(f"转换失败: {e}")
