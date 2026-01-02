@@ -45,7 +45,7 @@ class MediaProcessor:
     # 支持的图片格式
     IMAGE_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.bmp', '.gif', '.tiff'}
     # 支持的视频格式
-    VIDEO_EXTENSIONS = {'.avi', '.mp4', '.mov', '.mkv', '.flv', '.wmv', '.3gp', '.vob'}
+    VIDEO_EXTENSIONS = {'.avi', '.mp4', '.mov', '.mkv', '.flv', '.wmv', '.3gp', '.vob', '.mts'}
     # 支持的音频格式
     AUDIO_EXTENSIONS = {'.amr', '.mp3', '.wav', '.aac', '.flac'}
     
@@ -56,8 +56,8 @@ class MediaProcessor:
         Args:
             source_dir: 源目录路径
         """
-        self.source_dir = Path(source_dir)
-        self.archive_dir = self.source_dir.parent / 'archive' / self.source_dir.name
+        self.source_dir = Path(source_dir).resolve()
+        self.archive_dir = self.source_dir.parent / 'archive2' / self.source_dir.name
         
         if not self.source_dir.exists():
             raise ValueError(f"源目录不存在: {self.source_dir}")
@@ -100,6 +100,12 @@ class MediaProcessor:
         logger.info(f"找到 {len(mov_files)} 个MOV文件")
         for mov_file in mov_files:
             self.process_mov(mov_file)
+        
+        # 处理MTS文件
+        mts_files = [f for f in files if f.suffix.lower() == '.mts']
+        logger.info(f"找到 {len(mts_files)} 个MTS文件")
+        for mts_file in mts_files:
+            self.process_mts(mts_file)
         
         # 处理AMR文件
         amr_files = [f for f in files if f.suffix.lower() == '.amr']
@@ -253,6 +259,36 @@ class MediaProcessor:
                 self.set_mp4_metadata(mp4_path, media_date)
                 logger.info(f"  已设置MP4时间戳: {media_date}")
     
+    def process_mts(self, mts_path: Path):
+        """
+        处理MTS文件（与AVI相同的操作）
+        
+        Args:
+            mts_path: MTS文件路径
+        """
+        logger.info(f"处理MTS: {mts_path.name}")
+        
+        # 创建归档目录
+        self.archive_dir.mkdir(parents=True, exist_ok=True)
+        
+        # 移动MTS文件到归档目录
+        archive_mts_path = self.archive_dir / mts_path.name
+        shutil.move(str(mts_path), str(archive_mts_path))
+        logger.info(f"  已移动到: {archive_mts_path}")
+        
+        # 生成MP4文件
+        mp4_name = mts_path.stem + '.mp4'
+        mp4_path = self.source_dir / mp4_name
+        
+        if self.convert_mts_to_mp4(archive_mts_path, mp4_path):
+            logger.info(f"  已生成MP4: {mp4_path.name}")
+            
+            # 从文件名猜测创建时间并写入MP4元数据
+            media_date = self.guess_datetime_from_filename(mts_path)
+            if media_date:
+                self.set_mp4_metadata(mp4_path, media_date)
+                logger.info(f"  已设置MP4时间戳: {media_date}")
+    
     def process_amr(self, amr_path: Path):
         """
         处理AMR文件：转换为MP3并猜测时间戳，存档备份
@@ -372,14 +408,14 @@ class MediaProcessor:
             datetime对象或None
         """
         # 模式0: 对于视频或音频文件，如果是最后一个文件，尝试从前一个文件时间+1分钟
-        if file_path.suffix.lower() in {'.avi', '.3gp', '.vob', '.mov', '.amr'}:
+        if file_path.suffix.lower() in {'.avi', '.3gp', '.vob', '.mov', '.mts', '.amr'}:
             last_file_date = self._get_datetime_from_last_file(file_path)
             if last_file_date:
                 logger.info(f"  （最后一个文件）从前一个文件推断时间: {last_file_date}")
                 return last_file_date
             
             # 模式1: 对于视频文件，尝试通过相邻照片的EXIF时间插值
-            if file_path.suffix.lower() in {'.avi', '.3gp', '.vob', '.mov'}:
+            if file_path.suffix.lower() in {'.avi', '.3gp', '.vob', '.mov', '.mts'}:
                 interpolated_date = self._interpolate_datetime_from_neighbors(file_path)
                 if interpolated_date:
                     logger.info(f"  通过相邻照片插值得到时间: {interpolated_date}")
@@ -769,6 +805,53 @@ class MediaProcessor:
             logger.error(f"转换失败: {e}")
             return False
     
+    def convert_mts_to_mp4(self, mts_path: Path, mp4_path: Path) -> bool:
+        """
+        使用ffmpeg将MTS转换为MP4
+        
+        Args:
+            mts_path: MTS文件路径
+            mp4_path: 输出MP4文件路径
+            
+        Returns:
+            转换是否成功
+        """
+        try:
+            # 检查ffmpeg是否已安装
+            subprocess.run(['ffmpeg', '-version'], 
+                         capture_output=True, 
+                         check=True)
+        except (FileNotFoundError, subprocess.CalledProcessError):
+            logger.error("ffmpeg未安装，无法转换视频")
+            return False
+        
+        try:
+            # 使用ffmpeg转换MTS为MP4，保持质量
+            cmd = [
+                'ffmpeg',
+                '-i', str(mts_path),
+                '-c:v', 'libx264',
+                '-preset', 'medium',
+                '-crf', '18',  # 质量参数，18很高，0是无损
+                '-c:a', 'aac',
+                '-q:a', '9',
+                '-y',  # 覆盖输出文件
+                str(mp4_path)
+            ]
+            
+            logger.info(f"  转换中: {mts_path.name} -> {mp4_path.name}")
+            subprocess.run(cmd, check=True, 
+                         capture_output=True,
+                         timeout=3600)  # 1小时超时
+            
+            return mp4_path.exists()
+        except subprocess.TimeoutExpired:
+            logger.error(f"转换超时: {mts_path.name}")
+            return False
+        except Exception as e:
+            logger.error(f"转换失败: {e}")
+            return False
+    
     def convert_amr_to_mp3(self, amr_path: Path, mp3_path: Path) -> bool:
         """
         使用ffmpeg将AMR转换为MP3
@@ -914,7 +997,9 @@ def main():
             processor = MediaProcessor(dir_path)
             processor.process_all()
         except Exception as e:
+            import traceback
             logger.error(f"处理目录失败 {dir_path}: {e}")
+            logger.error(traceback.format_exc())
             sys.exit(1)
 
 
