@@ -107,6 +107,12 @@ class MediaProcessor:
         for mts_file in mts_files:
             self.process_mts(mts_file)
         
+        # 处理FLV文件
+        flv_files = [f for f in files if f.suffix.lower() == '.flv']
+        logger.info(f"找到 {len(flv_files)} 个FLV文件")
+        for flv_file in flv_files:
+            self.process_flv(flv_file)
+        
         # 处理AMR文件
         amr_files = [f for f in files if f.suffix.lower() == '.amr']
         logger.info(f"找到 {len(amr_files)} 个AMR文件")
@@ -289,6 +295,38 @@ class MediaProcessor:
                 self.set_mp4_metadata(mp4_path, media_date)
                 logger.info(f"  已设置MP4时间戳: {media_date}")
     
+    def process_flv(self, flv_path: Path):
+        """
+        处理FLV文件（与AVI相同的操作）
+        
+        Args:
+            flv_path: FLV文件路径
+        """
+        logger.info(f"处理FLV: {flv_path.name}")
+        
+        # 从文件名猜测创建时间（必须在移动文件之前）
+        media_date = self.guess_datetime_from_filename(flv_path)
+        
+        # 创建归档目录
+        self.archive_dir.mkdir(parents=True, exist_ok=True)
+        
+        # 移动FLV文件到归档目录
+        archive_flv_path = self.archive_dir / flv_path.name
+        shutil.move(str(flv_path), str(archive_flv_path))
+        logger.info(f"  已移动到: {archive_flv_path}")
+        
+        # 生成MP4文件
+        mp4_name = flv_path.stem + '.mp4'
+        mp4_path = self.source_dir / mp4_name
+        
+        if self.convert_flv_to_mp4(archive_flv_path, mp4_path):
+            logger.info(f"  已生成MP4: {mp4_path.name}")
+            
+            # 写入MP4元数据
+            if media_date:
+                self.set_mp4_metadata(mp4_path, media_date)
+                logger.info(f"  已设置MP4时间戳: {media_date}")
+    
     def process_amr(self, amr_path: Path):
         """
         处理AMR文件：转换为MP3并猜测时间戳，存档备份
@@ -408,14 +446,14 @@ class MediaProcessor:
             datetime对象或None
         """
         # 模式0: 对于视频或音频文件，如果是最后一个文件，尝试从前一个文件时间+1分钟
-        if file_path.suffix.lower() in {'.avi', '.3gp', '.vob', '.mov', '.mts', '.amr'}:
+        if file_path.suffix.lower() in {'.avi', '.3gp', '.vob', '.mov', '.mts', '.flv', '.amr'}:
             last_file_date = self._get_datetime_from_last_file(file_path)
             if last_file_date:
                 logger.info(f"  （最后一个文件）从前一个文件推断时间: {last_file_date}")
                 return last_file_date
             
             # 模式1: 对于视频文件，尝试通过相邻照片的EXIF时间插值
-            if file_path.suffix.lower() in {'.avi', '.3gp', '.vob', '.mov', '.mts'}:
+            if file_path.suffix.lower() in {'.avi', '.3gp', '.vob', '.mov', '.mts', '.flv'}:
                 interpolated_date = self._interpolate_datetime_from_neighbors(file_path)
                 if interpolated_date:
                     logger.info(f"  通过相邻照片插值得到时间: {interpolated_date}")
@@ -847,6 +885,53 @@ class MediaProcessor:
             return mp4_path.exists()
         except subprocess.TimeoutExpired:
             logger.error(f"转换超时: {mts_path.name}")
+            return False
+        except Exception as e:
+            logger.error(f"转换失败: {e}")
+            return False
+    
+    def convert_flv_to_mp4(self, flv_path: Path, mp4_path: Path) -> bool:
+        """
+        使用ffmpeg将FLV转换为MP4
+        
+        Args:
+            flv_path: FLV文件路径
+            mp4_path: 输出MP4文件路径
+            
+        Returns:
+            转换是否成功
+        """
+        try:
+            # 检查ffmpeg是否已安装
+            subprocess.run(['ffmpeg', '-version'], 
+                         capture_output=True, 
+                         check=True)
+        except (FileNotFoundError, subprocess.CalledProcessError):
+            logger.error("ffmpeg未安装，无法转换视频")
+            return False
+        
+        try:
+            # 使用ffmpeg转换FLV为MP4，保持质量
+            cmd = [
+                'ffmpeg',
+                '-i', str(flv_path),
+                '-c:v', 'libx264',
+                '-preset', 'medium',
+                '-crf', '18',  # 质量参数，18很高，0是无损
+                '-c:a', 'aac',
+                '-q:a', '9',
+                '-y',  # 覆盖输出文件
+                str(mp4_path)
+            ]
+            
+            logger.info(f"  转换中: {flv_path.name} -> {mp4_path.name}")
+            subprocess.run(cmd, check=True, 
+                         capture_output=True,
+                         timeout=3600)  # 1小时超时
+            
+            return mp4_path.exists()
+        except subprocess.TimeoutExpired:
+            logger.error(f"转换超时: {flv_path.name}")
             return False
         except Exception as e:
             logger.error(f"转换失败: {e}")
