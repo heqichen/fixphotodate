@@ -122,6 +122,12 @@ class MediaProcessor:
         for flv_file in flv_files:
             self.process_flv(flv_file)
         
+        # 处理MP4文件（原始MP4文件或转换后的）
+        mp4_files = [f for f in files if f.suffix.lower() == '.mp4']
+        logger.info(f"找到 {len(mp4_files)} 个MP4文件")
+        for mp4_file in mp4_files:
+            self.process_mp4(mp4_file)
+        
         # 处理AMR文件
         amr_files = [f for f in files if f.suffix.lower() == '.amr']
         logger.info(f"找到 {len(amr_files)} 个AMR文件")
@@ -345,6 +351,31 @@ class MediaProcessor:
                 self.set_mp4_metadata(mp4_path, media_date)
                 logger.info(f"  已设置MP4时间戳: {media_date}")
     
+    def process_mp4(self, mp4_path: Path):
+        """
+        处理MP4文件：从video-<YYYY-MM-DD-HH-mm-ss>***格式文件名提取时间并更新元数据
+        
+        Args:
+            mp4_path: MP4文件路径
+        """
+        logger.info(f"处理MP4: {mp4_path.name}")
+        
+        # 从文件名提取时间（video-YYYY-MM-DD-HH-mm-ss格式）
+        media_date = self._extract_datetime_from_video_format(mp4_path)
+        
+        if media_date:
+            logger.info(f"  从video格式文件名提取时间: {media_date}")
+            # 更新MP4元数据
+            self.set_mp4_metadata(mp4_path, media_date)
+            logger.info(f"  已设置MP4时间戳: {media_date}")
+        else:
+            # 尝试猜测时间
+            media_date = self.guess_datetime_from_filename(mp4_path)
+            if media_date:
+                logger.info(f"  猜测时间: {media_date}")
+                self.set_mp4_metadata(mp4_path, media_date)
+                logger.info(f"  已设置MP4时间戳: {media_date}")
+    
     def process_amr(self, amr_path: Path):
         """
         处理AMR文件：转换为MP3并猜测时间戳，存档备份
@@ -440,6 +471,40 @@ class MediaProcessor:
             return None
         except Exception as e:
             logger.debug(f"MA格式时间提取失败: {e}")
+            return None
+    
+    def _extract_datetime_from_video_format(self, video_path: Path) -> Optional[datetime]:
+        """
+        从特殊格式的视频文件名提取时间戳：video-<YYYY-MM-DD-HH-mm-ss>***
+        例如：video-2012-03-17-23-48-09 → 2012-03-17 23:48:09
+        或：video-2012-03-17-23-48-09-123456 → 2012-03-17 23:48:09
+        
+        Args:
+            video_path: 视频文件路径
+            
+        Returns:
+            datetime对象或None
+        """
+        try:
+            file_name = video_path.stem  # 不包含扩展名
+            
+            # 检查是否以video-开头，并且后面跟YYYY-MM-DD-HH-mm-ss格式
+            match = re.match(r'^video-(\d{4})-(\d{2})-(\d{2})-(\d{2})-(\d{2})-(\d{2})', file_name)
+            if match:
+                year = int(match.group(1))
+                month = int(match.group(2))
+                day = int(match.group(3))
+                hour = int(match.group(4))
+                minute = int(match.group(5))
+                second = int(match.group(6))
+                
+                dt = datetime(year, month, day, hour, minute, second)
+                logger.debug(f"从video格式文件名提取时间: {file_name} → {dt}")
+                return dt
+            
+            return None
+        except Exception as e:
+            logger.debug(f"video格式时间提取失败: {e}")
             return None
     
     def set_exif_datetime(self, image_path: Path, dt: datetime):
