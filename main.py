@@ -3,8 +3,17 @@
 """
 照片和视频处理脚本
 功能：
-1. 读取照片的EXIF拍摄日期，如果没有则猜测时间
-2. 处理AVI视频文件，转换为MP4并写入元数据
+1. 处理JPG/JPEG图片：
+   - 从MA<YYYYMMDDHHMMSS>***格式文件名提取时间（优先级最高）
+   - 读取EXIF拍摄日期，如果没有则猜测时间
+   - 自动更新EXIF信息
+2. 处理视频文件（AVI/3GP/VOB/MOV/MTS/FLV）：
+   - 转换为MP4格式
+   - 智能推断拍摄时间
+   - 写入MP4元数据
+3. 处理音频文件（AMR）：
+   - 转换为MP3格式
+   - 猜测创建时间
 """
 
 import sys
@@ -130,20 +139,29 @@ class MediaProcessor:
         """
         logger.info(f"处理图片: {image_path.name}")
         
-        # 尝试读取EXIF日期
-        exif_date = self.get_exif_datetime(image_path)
+        # 首先尝试从特殊的"MA"格式文件名提取时间（最优先）
+        exif_date = self._extract_datetime_from_ma_format(image_path)
         
         if exif_date:
-            logger.info(f"  EXIF日期: {exif_date}")
+            logger.info(f"  从MA格式文件名提取时间: {exif_date}")
+            # 更新EXIF日期
+            self.set_exif_datetime(image_path, exif_date)
+            logger.info("  已更新图片EXIF日期")
         else:
-            # 猜测时间
-            exif_date = self.guess_datetime_from_filename(image_path)
-            logger.info(f"  猜测日期: {exif_date}")
+            # 尝试读取EXIF日期
+            exif_date = self.get_exif_datetime(image_path)
             
-            # 如果成功猜测或读取，更新图片EXIF
             if exif_date:
-                self.set_exif_datetime(image_path, exif_date)
-                logger.info("  已更新图片日期")
+                logger.info(f"  EXIF日期: {exif_date}")
+            else:
+                # 猜测时间
+                exif_date = self.guess_datetime_from_filename(image_path)
+                logger.info(f"  猜测日期: {exif_date}")
+                
+                # 如果成功猜测或读取，更新图片EXIF
+                if exif_date:
+                    self.set_exif_datetime(image_path, exif_date)
+                    logger.info("  已更新图片日期")
     
     def process_avi(self, avi_path: Path):
         """
@@ -395,6 +413,34 @@ class MediaProcessor:
             logger.debug(f"读取EXIF失败: {e}")
         
         return None
+    
+    def _extract_datetime_from_ma_format(self, image_path: Path) -> Optional[datetime]:
+        """
+        从特殊格式的文件名提取时间戳：MA<YYYYMMDDHHMMSS>***
+        例如：MA201203141423570096-12-000000 → 2012-03-14 14:23:57
+        
+        Args:
+            image_path: 图片路径
+            
+        Returns:
+            datetime对象或None
+        """
+        try:
+            file_name = image_path.stem  # 不包含扩展名
+            
+            # 检查是否以MA开头，并且后面跟14位数字（YYYYMMDDHHMMSS）
+            match = re.match(r'^MA(\d{14})', file_name)
+            if match:
+                datetime_str = match.group(1)  # 提取14位数字
+                # 格式：YYYYMMDDHHMMSS
+                dt = datetime.strptime(datetime_str, '%Y%m%d%H%M%S')
+                logger.debug(f"从MA格式文件名提取时间: {file_name} → {dt}")
+                return dt
+            
+            return None
+        except Exception as e:
+            logger.debug(f"MA格式时间提取失败: {e}")
+            return None
     
     def set_exif_datetime(self, image_path: Path, dt: datetime):
         """
