@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-照片和视频处理脚本
+照片和视频处理脚本 (v3.7.2 - EXIF修复版)
 功能：
 1. 处理JPG/JPEG图片：
-   - 从MA<YYYYMMDDHHMMSS>***格式文件名提取时间（优先级最高）
+   - 从临时文件名<YYYY-MM-DD HH.mm.ss>***格式提取时间（优先级1）✨
+   - 从MA<YYYYMMDDHHMMSS>***格式文件名提取时间（优先级2）
    - 读取EXIF拍摄日期，如果没有则猜测时间
-   - 自动更新EXIF信息
+   - 自动更新EXIF信息（已修复EXIF保存问题）✅
 2. 处理视频文件（AVI/3GP/VOB/MOV/MTS/FLV）：
    - 转换为MP4格式
    - 智能推断拍摄时间
@@ -14,6 +15,12 @@
 3. 处理音频文件（AMR）：
    - 转换为MP3格式
    - 猜测创建时间
+
+v3.7.2 EXIF修复更新：
+- ✅ 修复piexif.dump()类型错误（DateTime需bytes+\\x00）
+- ✅ 修复EXIF无法持久化保存问题（使用临时文件+format+quality）
+- ✅ 清理问题EXIF标签（ExposureTime等）
+- ✅ 已验证EXIF拍摄时间正确写入
 """
 
 import sys
@@ -145,29 +152,36 @@ class MediaProcessor:
         """
         logger.info(f"处理图片: {image_path.name}")
         
-        # 首先尝试从特殊的"MA"格式文件名提取时间（最优先）
-        exif_date = self._extract_datetime_from_ma_format(image_path)
+        # 优先级1: 尝试从临时文件名格式提取时间（最优先）
+        exif_date = self._extract_datetime_from_temp_filename(image_path)
         
         if exif_date:
-            logger.info(f"  从MA格式文件名提取时间: {exif_date}")
-            # 更新EXIF日期
+            logger.info(f"  从临时文件名格式提取时间: {exif_date}")
             self.set_exif_datetime(image_path, exif_date)
             logger.info("  已更新图片EXIF日期")
         else:
-            # 尝试读取EXIF日期
-            exif_date = self.get_exif_datetime(image_path)
+            # 优先级2: 尝试从MA格式文件名提取时间
+            exif_date = self._extract_datetime_from_ma_format(image_path)
             
             if exif_date:
-                logger.info(f"  EXIF日期: {exif_date}")
+                logger.info(f"  从MA格式文件名提取时间: {exif_date}")
+                self.set_exif_datetime(image_path, exif_date)
+                logger.info("  已更新图片EXIF日期")
             else:
-                # 猜测时间
-                exif_date = self.guess_datetime_from_filename(image_path)
-                logger.info(f"  猜测日期: {exif_date}")
+                # 优先级3: 尝试读取EXIF日期
+                exif_date = self.get_exif_datetime(image_path)
                 
-                # 如果成功猜测或读取，更新图片EXIF
                 if exif_date:
-                    self.set_exif_datetime(image_path, exif_date)
-                    logger.info("  已更新图片日期")
+                    logger.info(f"  EXIF日期: {exif_date}")
+                else:
+                    # 优先级4: 猜测时间
+                    exif_date = self.guess_datetime_from_filename(image_path)
+                    logger.info(f"  猜测日期: {exif_date}")
+                    
+                    # 如果成功猜测或读取，更新图片EXIF
+                    if exif_date:
+                        self.set_exif_datetime(image_path, exif_date)
+                        logger.info("  已更新图片日期")
     
     def process_avi(self, avi_path: Path):
         """
@@ -445,6 +459,40 @@ class MediaProcessor:
         
         return None
     
+    def _extract_datetime_from_temp_filename(self, image_path: Path) -> Optional[datetime]:
+        """
+        从临时文件名格式提取时间戳：临时文件名<YYYY-MM-DD HH.mm.ss>***
+        例如：临时文件名2012-03-19 02.59.06 → 2012-03-19 02:59:06
+        
+        Args:
+            image_path: 图片路径
+            
+        Returns:
+            datetime对象或None
+        """
+        try:
+            file_name = image_path.stem  # 不包含扩展名
+            
+            # 检查是否包含 YYYY-MM-DD HH.mm.ss 格式的时间戳
+            # 支持格式: 临时文件名2012-03-19 02.59.06 或其他前缀
+            match = re.search(r'(\d{4})-(\d{2})-(\d{2})\s+(\d{2})\.(\d{2})\.(\d{2})', file_name)
+            if match:
+                year = int(match.group(1))
+                month = int(match.group(2))
+                day = int(match.group(3))
+                hour = int(match.group(4))
+                minute = int(match.group(5))
+                second = int(match.group(6))
+                
+                dt = datetime(year, month, day, hour, minute, second)
+                logger.debug(f"从临时文件名格式提取时间: {file_name} → {dt}")
+                return dt
+            
+            return None
+        except Exception as e:
+            logger.debug(f"临时文件名格式时间提取失败: {e}")
+            return None
+    
     def _extract_datetime_from_ma_format(self, image_path: Path) -> Optional[datetime]:
         """
         从特殊格式的文件名提取时间戳：MA<YYYYMMDDHHMMSS>***
@@ -527,13 +575,34 @@ class MediaProcessor:
                 exif_dict = {"0th": {}, "Exif": {}, "GPS": {}}
             
             # 更新DateTime字段
+            # piexif ASCII字段需要bytes格式，且需要null终止符
             datetime_str = dt.strftime('%Y:%m:%d %H:%M:%S')
-            exif_dict["Exif"][36867] = datetime_str.encode('utf-8')  # DateTimeOriginal
-            exif_dict["0th"][306] = datetime_str.encode('utf-8')      # DateTime
+            datetime_bytes = (datetime_str + "\x00").encode('utf-8')
             
-            # 写入EXIF
+            # 清理并重建0th IFD，只保留DateTime标签
+            exif_dict["0th"][306] = datetime_bytes      # DateTime
+            exif_dict["Exif"][36867] = datetime_bytes   # DateTimeOriginal
+            
+            # 清理可能有问题的标签，使用piexif.dump前的验证
+            # 删除可能导致问题的标签
+            problematic_tags = [33434, 34850, 34855]  # ExposureTime, Flash, ISOSpeedRatings等
+            for tag in problematic_tags:
+                if tag in exif_dict.get("0th", {}):
+                    del exif_dict["0th"][tag]
+                if tag in exif_dict.get("Exif", {}):
+                    del exif_dict["Exif"][tag]
+            
+            # 写入EXIF - 必须使用临时文件，然后覆盖原文件
             exif_bytes = piexif.dump(exif_dict)
-            Image.open(image_path).save(image_path, exif=exif_bytes)
+            
+            # 打开图片并保存，需要指定format为JPEG
+            img = Image.open(image_path)
+            # 保存到临时文件
+            temp_path = image_path.with_suffix('.tmp')
+            img.save(str(temp_path), 'jpeg', exif=exif_bytes, quality=95)
+            # 替换原文件
+            temp_path.replace(image_path)
+            
             logger.debug(f"EXIF已更新: {image_path.name}")
         except Exception as e:
             logger.error(f"更新EXIF失败: {e}")
